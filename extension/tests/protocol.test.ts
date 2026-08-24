@@ -278,6 +278,27 @@ describe("native protocol validation", () => {
     ).toBeNull();
   });
 
+  it("accepts a completed restore when Rust emits null optional worker telemetry", () => {
+    expect(
+      parseNativeHostResponse({
+        request_id: "restore-completed",
+        response: "job_restored",
+        job: {
+          job_id: NATIVE_JOB_ID,
+          kind: "full_transcript",
+          state: "completed",
+          progress: {
+            processed_ms: 60_000,
+            media_duration_ms: 60_000,
+            worker_status: null,
+            worker_pid: null,
+            last_progress_at_ms: null
+          }
+        }
+      })
+    ).toMatchObject({ response: "job_restored", job: { state: "completed" } });
+  });
+
   it("serializes cue-page requests and parses the Rust subtitle_cues response shape", () => {
     expect(createNativeGetSubtitleCuesRequest(NATIVE_JOB_ID, { limit: 200 }, "cue-request-1")).toEqual({
       request_id: "cue-request-1",

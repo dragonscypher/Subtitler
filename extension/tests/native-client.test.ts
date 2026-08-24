@@ -279,6 +279,11 @@ describe("NativeClient", () => {
       }
     });
 
+    expect(events).toContainEqual({
+      protocolVersion: 1,
+      type: "job.accepted",
+      payload: { jobId: "extension-restore-status-fallback", nativeJobId: NATIVE_JOB_ID }
+    });
     expect(posted[3]).toMatchObject({ command: "get_transcript_segments", job_id: NATIVE_JOB_ID });
     expect(events.some((event) => (event as { type?: string }).type === "job.failed")).toBe(false);
   });

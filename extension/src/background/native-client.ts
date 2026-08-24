@@ -338,6 +338,20 @@ export class NativeClient {
             }
             return;
           }
+          // A restore response can be lost while the native port itself stays
+          // healthy. In that case `scheduleRestoreStatusFallback` reaches
+          // this normal status path. Re-emit acceptance before handling the
+          // terminal status so the background leaves `recovering` and starts
+          // its bounded transcript-result cache before result pages arrive.
+          if (this.restoreRequestsInFlight.delete(clientJobId)) {
+            this.clearRestoreStatusFallback(clientJobId);
+            this.restoredJobKeys.add(`${clientJobId}:${response.job.job_id}`);
+            this.notify({
+              protocolVersion: 1,
+              type: "job.accepted",
+              payload: { jobId: clientJobId, nativeJobId: response.job.job_id }
+            });
+          }
           this.handleJobStatus(clientJobId, response);
         }
         return;

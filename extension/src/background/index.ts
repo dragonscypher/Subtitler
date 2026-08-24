@@ -36,6 +36,7 @@ import { createChromeExportDownloadApi, ExportDownloadCoordinator } from "./expo
 import { JobStore, jobsForTab, type NewJob } from "./job-store";
 import { NativeClient } from "./native-client";
 import { findActiveGeneratedSubtitleJob } from "./playback-routing";
+import { completedTranscriptJobsToHydrate } from "./recovery";
 import { prepareTranscriptExport } from "./transcript-export";
 import { discoverYoutubeCaptionTracks, loadYoutubeCaptionCues } from "./youtube-caption-bridge";
 import { classifyRecordingPageUrl } from "../platforms/recording-platforms";
@@ -54,7 +55,16 @@ const exportDownloadApi = createChromeExportDownloadApi();
 /** No export state or Blob URL is persisted across a service-worker restart. */
 const exportDownloads = exportDownloadApi ? new ExportDownloadCoordinator(exportDownloadApi) : undefined;
 const initialized = jobStore.initialize();
+/** New value whenever Chrome creates a fresh service-worker lifetime. */
+const contentRuntimeInstanceId = crypto.randomUUID();
 let nativeMessageChain: Promise<void> = Promise.resolve();
+/**
+ * A completed transcript is rehydrated at most once per service-worker
+ * lifetime. Its readable pages live only in memory, so a fresh worker must
+ * recover it again, but popup polling must never turn an already hydrated
+ * result back into `recovering`.
+ */
+const hydratedCompletedTranscriptIds = new Set<string>();
 
 nativeClient.onMessage((message) => {
   // A transcript page must reach the transient result store before its
@@ -74,13 +84,19 @@ nativeClient.onDisconnect(() => {
 // safely reconnect a persisted opaque native job ID to the host's own private
 // checkpoint/export bundle. This never resends a media URL or browser session.
 void initialized.then(() => reconcilePersistedJobs()).catch(() => undefined);
+// Chrome does not remove isolated-world objects or injected DOM on an
+// extension reload.  Reinject into origins covered by persistent host
+// permission so the fresh controller disposes the former one immediately.
+void rehydrateKnownContentTabs().catch(() => undefined);
 
 chrome.runtime.onInstalled.addListener(() => {
   void initialized.catch(() => undefined);
+  void rehydrateKnownContentTabs().catch(() => undefined);
 });
 
 chrome.runtime.onStartup.addListener(() => {
   void initialized.catch(() => undefined);
+  void rehydrateKnownContentTabs().catch(() => undefined);
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -121,9 +137,15 @@ async function handlePopupRequest(request: PopupRequest): Promise<PopupResponse>
       const active = await getActiveMedia();
       return active.ok ? success(active.data.detection) : active;
     }
-    case "popup.get-jobs":
-      reconcilePersistedJobs();
+    case "popup.get-jobs": {
+      const jobs = await jobsForActiveTab();
+      // A completed transcript's readable pages are intentionally not in
+      // chrome.storage. Opening its owning tab's popup is an explicit local
+      // recovery action: reattach the opaque native ID and refill only this
+      // worker's bounded result cache without retranscribing media.
+      await reconcilePersistedJobs(jobs[0]?.tabId);
       return success(await jobsForActiveTab());
+    }
     case "popup.get-engine-state":
       return success(engineConnectionState.snapshot());
     case "popup.get-transcript":
@@ -818,7 +840,7 @@ async function getActiveMedia(): Promise<Result<ActiveMedia>> {
     return failure("PAGE_UNAVAILABLE", "Subtitler could not access the active browser tab.");
   }
   try {
-    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content.js"] });
+    await ensureContentScript(tab.id);
   } catch {
     return failure("PAGE_UNAVAILABLE", "This browser page does not allow Subtitler to inspect media.");
   }
@@ -835,6 +857,68 @@ async function getActiveMedia(): Promise<Result<ActiveMedia>> {
     active.pageUrl = tab.url;
   }
   return success(active);
+}
+
+/**
+ * A content script may outlive its extension runtime.  Before executing the
+ * current bundle, remove only marked Subtitler roots and ask the old
+ * controller to unregister listeners.  Repeated calls in one runtime retain
+ * the existing controller, so media detection remains idempotent.
+ */
+async function ensureContentScript(tabId: number): Promise<void> {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (runtimeInstanceId: string): void => {
+      type ReloadableController = { dispose?: () => void; stopOverlay?: () => void };
+      type SubtitlerWindow = {
+        __subtitlerContentController?: unknown;
+        __subtitlerContentRuntimeInstanceId?: string;
+      };
+      const page = window as unknown as SubtitlerWindow;
+      if (page.__subtitlerContentRuntimeInstanceId === runtimeInstanceId) {
+        return;
+      }
+      const prior = page.__subtitlerContentController as ReloadableController | undefined;
+      try {
+        if (typeof prior?.dispose === "function") {
+          prior.dispose();
+        } else if (typeof prior?.stopOverlay === "function") {
+          // Compatibility with an injected controller from a build before the
+          // public dispose lifecycle existed.
+          prior.stopOverlay();
+        }
+      } catch {
+        // The old extension context may already be detached.  Its marked DOM
+        // is still cleaned below, and the fresh content script owns this page.
+      }
+      delete page.__subtitlerContentController;
+      document
+        .querySelectorAll('[data-subtitler-overlay-root="true"], [data-subtitler-overlay="true"]')
+        .forEach((root) => root.remove());
+      page.__subtitlerContentRuntimeInstanceId = runtimeInstanceId;
+    },
+    args: [contentRuntimeInstanceId]
+  });
+  await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
+}
+
+/** Persistent permissions cover only known YouTube origins.  Other pages use
+ * activeTab, so their next user action performs the same safe handoff. */
+async function rehydrateKnownContentTabs(): Promise<void> {
+  const tabs = await chrome.tabs.query({
+    url: [
+      "https://youtube.com/*",
+      "https://*.youtube.com/*",
+      "https://youtube-nocookie.com/*",
+      "https://*.youtube-nocookie.com/*"
+    ]
+  });
+  await Promise.all(
+    tabs
+      .map((tab) => tab.id)
+      .filter((tabId): tabId is number => tabId !== undefined)
+      .map((tabId) => ensureContentScript(tabId).catch(() => undefined))
+  );
 }
 
 /**
@@ -930,6 +1014,7 @@ async function handleNativeMessage(message: NativeInboundMessage): Promise<void>
       }
       if (current.kind === "transcript") {
         transcriptResults.complete(current.id);
+        hydratedCompletedTranscriptIds.add(current.id);
       }
       await jobStore.update(message.payload.jobId, { status: "completed" });
       await stopGeneratedSubtitlePlaybackObservation(message.payload.jobId);
@@ -1149,7 +1234,26 @@ async function markDisconnectedJobsRecovering(): Promise<void> {
   );
 }
 
-function reconcilePersistedJobs(): void {
+async function reconcilePersistedJobs(activeTabId?: number): Promise<void> {
+  // In-flight work is always reconnectable. Completed transcript content is
+  // recovered only when the user opens the popup on its original tab; this
+  // avoids eagerly materializing previous private results in every new
+  // service-worker lifetime.
+  // A completed native job whose cue-page fetch failed used to be stored as
+  // NATIVE_ERROR by the old popup. Restoring that opaque native job reads its
+  // private checkpoint/export bundle; it never retranscribes.
+  const completedOnActiveTab = completedTranscriptJobsToHydrate(
+    jobStore.list(),
+    activeTabId,
+    hydratedCompletedTranscriptIds
+  );
+  for (const job of completedOnActiveTab) {
+    // Claim recovery before the asynchronous status write. Repeated popup
+    // polls must not schedule the same private result twice.
+    hydratedCompletedTranscriptIds.add(job.id);
+  }
+  await Promise.all(completedOnActiveTab.map((job) => jobStore.update(job.id, { status: "recovering" })));
+
   const recoverable = jobStore
     .list()
     .filter(

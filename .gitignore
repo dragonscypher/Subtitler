@@ -12,6 +12,11 @@ models/
 cache/
 artifacts/
 demo/
+demo-private/
+private-media/
+jobs/
+exports/
+yt-dlp/
 *.whisper.bin
 *.gguf
 

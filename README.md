@@ -5,6 +5,34 @@ full transcripts without requiring playback and renders timestamped subtitles
 ahead of a video playhead when the underlying media is accessible without
 bypassing DRM, encryption, authentication, or platform protections.
 
+## Status and demo
+
+**Implemented:** local audio acquisition/normalization, whisper.cpp-backed
+timestamped transcription, TXT/timestamped TXT/SRT/VTT/JSON export bundles,
+generated subtitle overlays, bounded ahead-of-playhead scheduling, and
+completed-transcript recovery after an extension/service-worker reconnect.
+The generated-overlay controller is idempotent: a player can own only one
+visible Subtitler overlay, including across start/stop, fullscreen, reload,
+and supported single-page-app navigation.
+
+**Verified in a developer Chrome session:** a public YouTube generated-ASR
+run used the direct local acquisition path (not YouTube captions), produced
+timestamped cues and a single synchronized overlay, and an authorized
+completed recording was recovered from the native private result bundle into
+the popup without replaying it. These are environment checks, not a claim of
+universal platform compatibility.
+
+**Platform-sensitive:** YouTube changes its media challenge requirements
+regularly, so its adapter depends on an installed maintained `yt-dlp`/Deno
+proof-of-origin provider. Webex and Zoom work only where an authorized,
+unencrypted recording representation is available through their normal player
+flow; protected/DRM media is deliberately rejected. Zoom has no dedicated V1
+retrieval adapter yet.
+
+Use the safe manual demo script in [docs/DEMO_RECORDING.md](docs/DEMO_RECORDING.md).
+It uses public or local non-confidential media only; raw clips and temporary
+media belong in ignored `demo-private/`.
+
 ## Current implementation
 
 This repository contains the Phase 1 design, Phase 2 extension/native-host

@@ -1014,7 +1014,10 @@ function parseNativeJobStatus(value: unknown): NativeHostJobStatus | null {
   if (isNonNegativeInteger(nativeProgress.completed_intervals)) progress.completed_intervals = nativeProgress.completed_intervals;
   if (isNonNegativeInteger(nativeProgress.worker_pid)) progress.worker_pid = nativeProgress.worker_pid;
   const workerStatuses = ["not_started", "active", "waiting", "finished", "unavailable"] as const;
-  if (nativeProgress.worker_status !== undefined) {
+  // Completed jobs have no worker process. Rust serializes that optional field
+  // as null, which must mean the same thing as omission rather than rejecting
+  // an otherwise valid terminal restore/status response.
+  if (nativeProgress.worker_status !== undefined && nativeProgress.worker_status !== null) {
     if (!workerStatuses.includes(nativeProgress.worker_status as (typeof workerStatuses)[number])) return null;
     progress.worker_status = nativeProgress.worker_status as NonNullable<NativeHostJobStatus["progress"]["worker_status"]>;
   }

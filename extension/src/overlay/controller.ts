@@ -6,24 +6,60 @@ type VideoFrameCapable = HTMLVideoElement & {
   cancelVideoFrameCallback?: (id: number) => void;
 };
 
+export const SUBTITLER_OVERLAY_ROOT_ATTRIBUTE = "data-subtitler-overlay-root";
+export const SUBTITLER_OVERLAY_OWNER_ATTRIBUTE = "data-subtitler-overlay-owner";
+export const SUBTITLER_ACTIVE_OVERLAY_OWNER_ATTRIBUTE = "data-subtitler-active-overlay-owner";
+// Builds before the ownership invariant used this marker. Keep recognizing it
+// so an unpacked-extension reload cannot leave that old, closed-shadow root
+// visible beside the new owner.
+export const SUBTITLER_LEGACY_OVERLAY_ATTRIBUTE = "data-subtitler-overlay";
+
+let overlayOwnerSequence = 0;
+
+/**
+ * A content script can be re-created while an older isolated-world instance
+ * still has page event handlers. This identifier is intentionally unique
+ * across those instances; a simple module counter would collide after reload.
+ */
+export function createOverlayOwnerId(): string {
+  overlayOwnerSequence += 1;
+  const random = globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return `subtitler-overlay-${random}-${overlayOwnerSequence}`;
+}
+
+/**
+ * Pure ownership rule shared by DOM reconciliation and regression tests.
+ * One controller-owned host is retained; every other Subtitler root is stale,
+ * even if a malformed/reloaded instance reused an owner value.
+ */
+export function staleOverlayRoots<T>(roots: readonly T[], retainedRoot: T | undefined): T[] {
+  return roots.filter((root) => root !== retainedRoot);
+}
+
 /**
  * A page-local overlay that is driven by the HTMLMediaElement clock. It never
  * captures or reads audio; it only renders timestamped cues supplied by native
  * processing or an already-authorized TextTrack.
  */
 export class SubtitleOverlayController {
+  private readonly ownerId = createOverlayOwnerId();
   private media: HTMLMediaElement | undefined;
   private cues: SubtitleCue[] = [];
   private host: HTMLDivElement | undefined;
   private textNode: HTMLDivElement | undefined;
   private cleanupCallbacks: Array<() => void> = [];
   private layoutObserver: ResizeObserver | undefined;
+  private ownershipObserver: MutationObserver | undefined;
   private animationFrameId: number | undefined;
   private videoFrameCallbackId: number | undefined;
   private lastText = "";
   private visible = true;
 
   attach(media: HTMLMediaElement, initialCues: readonly SubtitleCue[] = []): void {
+    // Claim before attaching listeners. A later content-script instance wins
+    // and removes stale page roots; an older instance then retires itself on
+    // its next media/layout callback instead of re-adding its old host.
+    this.claimDocumentOwnership();
     if (this.media !== media) {
       this.detachMediaListeners();
       this.media = media;
@@ -39,6 +75,9 @@ export class SubtitleOverlayController {
   }
 
   setCues(cues: readonly SubtitleCue[]): void {
+    if (!this.ensureCurrentOwnership()) {
+      return;
+    }
     this.cues = normalizeOverlayCues(cues);
     if (this.media) {
       this.renderAt(this.media.currentTime);
@@ -47,6 +86,9 @@ export class SubtitleOverlayController {
 
   /** Adds a bounded generated-cue page without dropping already-rendered pages. */
   appendCues(cues: readonly SubtitleCue[]): boolean {
+    if (!this.ensureCurrentOwnership()) {
+      return false;
+    }
     const merged = mergeOverlayCues(this.cues, cues);
     if (!merged) {
       return false;
@@ -59,6 +101,9 @@ export class SubtitleOverlayController {
   }
 
   setVisible(visible: boolean): void {
+    if (!this.ensureCurrentOwnership()) {
+      return;
+    }
     this.visible = visible;
     if (this.host) {
       this.host.style.display = visible ? "block" : "none";
@@ -68,12 +113,16 @@ export class SubtitleOverlayController {
   destroy(): void {
     this.stopClock();
     this.detachMediaListeners();
+    this.stopOwnershipObserver();
     this.media = undefined;
     this.cues = [];
     this.lastText = "";
     this.host?.remove();
     this.host = undefined;
     this.textNode = undefined;
+    if (document.documentElement.getAttribute(SUBTITLER_ACTIVE_OVERLAY_OWNER_ATTRIBUTE) === this.ownerId) {
+      document.documentElement.removeAttribute(SUBTITLER_ACTIVE_OVERLAY_OWNER_ATTRIBUTE);
+    }
   }
 
   private addMediaListeners(media: HTMLMediaElement): void {
@@ -130,11 +179,16 @@ export class SubtitleOverlayController {
   }
 
   private ensureHost(): void {
+    if (!this.isCurrentOwner()) {
+      return;
+    }
     if (this.host && this.textNode) {
       return;
     }
     const host = document.createElement("div");
-    host.dataset.subtitlerOverlay = "true";
+    host.setAttribute(SUBTITLER_OVERLAY_ROOT_ATTRIBUTE, "true");
+    host.setAttribute(SUBTITLER_OVERLAY_OWNER_ATTRIBUTE, this.ownerId);
+    host.setAttribute(SUBTITLER_LEGACY_OVERLAY_ATTRIBUTE, "true");
     host.setAttribute("aria-hidden", "false");
     Object.assign(host.style, {
       position: "fixed",
@@ -177,7 +231,7 @@ export class SubtitleOverlayController {
   }
 
   private repositionForFullscreen(): void {
-    if (!this.host || !this.media) {
+    if (!this.ensureCurrentOwnership() || !this.host || !this.media) {
       return;
     }
     const fullscreenElement = document.fullscreenElement;
@@ -191,12 +245,16 @@ export class SubtitleOverlayController {
     }
     if (isMediaFullscreen) {
       Object.assign(this.host.style, {
-        position: "absolute",
-        inset: "0",
-        left: "",
-        top: "",
-        width: "",
-        height: ""
+        // Some YouTube fullscreen wrappers retain a much wider document
+        // layout than the visible player. Absolute 50% positioning would put
+        // a cue at that off-screen layout midpoint. Fixed viewport geometry
+        // keeps the one host centered in the actual fullscreen surface.
+        position: "fixed",
+        inset: "auto",
+        left: "0px",
+        top: "0px",
+        width: "100vw",
+        height: "100vh"
       });
       return;
     }
@@ -212,6 +270,9 @@ export class SubtitleOverlayController {
   }
 
   private renderAt(timeSeconds: number): void {
+    if (!this.ensureCurrentOwnership()) {
+      return;
+    }
     const text = cueDisplayText(findActiveCue(this.cues, timeSeconds));
     if (text === this.lastText) {
       return;
@@ -223,6 +284,9 @@ export class SubtitleOverlayController {
   }
 
   private startClock(): void {
+    if (!this.ensureCurrentOwnership()) {
+      return;
+    }
     this.stopClock();
     const media = this.media;
     if (!media || media.paused || media.ended) {
@@ -231,7 +295,7 @@ export class SubtitleOverlayController {
     if (media instanceof HTMLVideoElement && typeof (media as VideoFrameCapable).requestVideoFrameCallback === "function") {
       const video = media as VideoFrameCapable;
       const tick = (): void => {
-        if (!this.media || this.media !== media || media.paused || media.ended) {
+        if (!this.ensureCurrentOwnership() || !this.media || this.media !== media || media.paused || media.ended) {
           return;
         }
         this.renderAt(media.currentTime);
@@ -242,7 +306,7 @@ export class SubtitleOverlayController {
     }
 
     const tick = (): void => {
-      if (!this.media || this.media !== media || media.paused || media.ended) {
+      if (!this.ensureCurrentOwnership() || !this.media || this.media !== media || media.paused || media.ended) {
         return;
       }
       this.renderAt(media.currentTime);
@@ -261,5 +325,75 @@ export class SubtitleOverlayController {
       media.cancelVideoFrameCallback(this.videoFrameCallbackId);
     }
     this.videoFrameCallbackId = undefined;
+  }
+
+  /** Establish this controller as the sole page-visible Subtitler owner. */
+  private claimDocumentOwnership(): void {
+    document.documentElement.setAttribute(SUBTITLER_ACTIVE_OVERLAY_OWNER_ATTRIBUTE, this.ownerId);
+    this.observeDocumentOwnership();
+    this.removeStaleOverlayRoots();
+  }
+
+  /**
+   * A pre-ownership build can keep a detached host in its controller and
+   * append it again on a fullscreen or SPA-layout event. One observer owned by
+   * the current controller makes that revival harmless without touching page
+   * elements that are not explicitly marked as Subtitler-owned.
+   */
+  private observeDocumentOwnership(): void {
+    if (this.ownershipObserver || typeof MutationObserver === "undefined") {
+      return;
+    }
+    this.ownershipObserver = new MutationObserver(() => {
+      if (!this.isCurrentOwner()) {
+        this.stopOwnershipObserver();
+        return;
+      }
+      this.removeStaleOverlayRoots();
+    });
+    this.ownershipObserver.observe(document.documentElement, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: [SUBTITLER_ACTIVE_OVERLAY_OWNER_ATTRIBUTE]
+    });
+  }
+
+  private stopOwnershipObserver(): void {
+    this.ownershipObserver?.disconnect();
+    this.ownershipObserver = undefined;
+  }
+
+  private removeStaleOverlayRoots(): void {
+    const roots = Array.from(
+      document.querySelectorAll<HTMLElement>(
+        `[${SUBTITLER_OVERLAY_ROOT_ATTRIBUTE}="true"], [${SUBTITLER_LEGACY_OVERLAY_ATTRIBUTE}="true"]`
+      )
+    );
+    for (const root of staleOverlayRoots(roots, this.host)) {
+      // A controller can safely retain only its own current host. Every
+      // orphaned/reloaded host is a Subtitler-owned root and is removed.
+      root.remove();
+    }
+  }
+
+  private isCurrentOwner(): boolean {
+    return document.documentElement.getAttribute(SUBTITLER_ACTIVE_OVERLAY_OWNER_ATTRIBUTE) === this.ownerId;
+  }
+
+  /** Old handlers become inert after a newer controller claims the document. */
+  private ensureCurrentOwnership(): boolean {
+    if (this.isCurrentOwner()) {
+      return true;
+    }
+    this.detachMediaListeners();
+    this.stopOwnershipObserver();
+    this.media = undefined;
+    this.cues = [];
+    this.lastText = "";
+    this.host?.remove();
+    this.host = undefined;
+    this.textNode = undefined;
+    return false;
   }
 }

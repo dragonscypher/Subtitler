@@ -40,6 +40,12 @@ interface PlaybackObservation {
   observer: PlaybackObserver;
 }
 
+/** Native/page captions suppressed while one Subtitler-generated overlay owns media. */
+interface SourceCaptionSuppression {
+  tracks: Array<{ track: TextTrack; originalMode: TextTrackMode }>;
+  youtubeCaptionStyle: HTMLStyleElement | undefined;
+}
+
 /** Owns all page-side state. No recording, cookie, or session data is persisted here. */
 export class ContentController {
   private readonly registry = new MediaRegistry();
@@ -48,7 +54,18 @@ export class ContentController {
   private overlayMode: "existing" | "generated" | undefined;
   private existingTrackBinding: ExistingTrackBinding | undefined;
   private visibleCaptionBinding: VisibleCaptionBinding | undefined;
+  private sourceCaptionSuppression: SourceCaptionSuppression | undefined;
   private playbackObservation: PlaybackObservation | undefined;
+
+  /**
+   * Called by a newly injected extension runtime before it replaces an older
+   * page controller.  Extension reloads do not remove DOM or page listeners,
+   * so disposal must be explicit rather than leaving an old controller able
+   * to recreate its overlay during fullscreen/player layout changes.
+   */
+  dispose(): void {
+    this.stopOverlay();
+  }
 
   handleMessage(value: unknown): ContentResponse {
     if (!isContentRequest(value)) {
@@ -133,6 +150,7 @@ export class ContentController {
     this.stopPlaybackObservation();
     this.clearExistingCaptionBinding();
     this.clearVisibleCaptionBinding();
+    this.clearSourceCaptionSuppression();
     this.overlayMediaId = mediaId;
     this.overlayMode = mode;
 
@@ -145,11 +163,21 @@ export class ContentController {
         this.overlayMode = undefined;
         return failure("NO_MEDIA", "No usable existing captions are currently available for this media.");
       }
+      // Keep every native surface hidden while our one existing-caption
+      // overlay renders. The selected TextTrack remains readable in hidden
+      // mode for cuechange updates.
+      this.suppressSourceCaptions(media, false);
       this.bindExistingCaptions(media, textTrack);
       this.overlay.attach(media, readCaptionCues(textTrack));
       return success({ started: true });
     }
 
+    // Generated captions replace source captions. The visible YouTube
+    // fallback is the one exception: it must read that surface before hiding
+    // its own caption segments, so it manages that surface itself.
+    if (!visibleCaptionFallback) {
+      this.suppressSourceCaptions(media, true);
+    }
     this.overlay.attach(media, suppliedCues);
     if (visibleCaptionFallback) {
       this.bindVisibleYoutubeCaptions(media);
@@ -206,6 +234,7 @@ export class ContentController {
     this.stopPlaybackObservation(mediaId);
     this.clearExistingCaptionBinding();
     this.clearVisibleCaptionBinding();
+    this.clearSourceCaptionSuppression();
     this.overlay.destroy();
     this.overlayMediaId = undefined;
     this.overlayMode = undefined;
@@ -366,6 +395,53 @@ export class ContentController {
     }
     this.visibleCaptionBinding = undefined;
   }
+
+  /**
+   * Browser-native tracks and YouTube's caption surface are source captions,
+   * not independent Subtitler overlays. Hide them only while generated/our
+   * existing overlay is active, then restore exactly their previous state.
+   */
+  private suppressSourceCaptions(media: HTMLMediaElement, suppressYoutubeCaptionSurface: boolean): void {
+    const tracks: SourceCaptionSuppression["tracks"] = [];
+    for (const track of Array.from(media.textTracks)) {
+      if (track.kind !== "captions" && track.kind !== "subtitles") {
+        continue;
+      }
+      tracks.push({ track, originalMode: track.mode });
+      track.mode = "hidden";
+    }
+
+    let youtubeCaptionStyle: HTMLStyleElement | undefined;
+    if (suppressYoutubeCaptionSurface && isYoutubePage()) {
+      for (const stale of Array.from(document.querySelectorAll<HTMLStyleElement>('style[data-subtitler-source-caption-suppression="true"]'))) {
+        stale.remove();
+      }
+      youtubeCaptionStyle = document.createElement("style");
+      youtubeCaptionStyle.dataset.subtitlerSourceCaptionSuppression = "true";
+      // Limit this page-local rule to YouTube's dedicated caption surface;
+      // never hide arbitrary aria-live/page content.
+      youtubeCaptionStyle.textContent = "#ytp-caption-window-container { visibility: hidden !important; }";
+      (document.head ?? document.documentElement).append(youtubeCaptionStyle);
+    }
+    this.sourceCaptionSuppression = { tracks, youtubeCaptionStyle };
+  }
+
+  private clearSourceCaptionSuppression(): void {
+    const suppression = this.sourceCaptionSuppression;
+    if (!suppression) {
+      return;
+    }
+    for (const { track, originalMode } of suppression.tracks) {
+      track.mode = originalMode;
+    }
+    suppression.youtubeCaptionStyle?.remove();
+    this.sourceCaptionSuppression = undefined;
+  }
+}
+
+function isYoutubePage(): boolean {
+  const hostname = window.location.hostname.toLowerCase();
+  return hostname === "youtube.com" || hostname.endsWith(".youtube.com") || hostname === "youtube-nocookie.com" || hostname.endsWith(".youtube-nocookie.com");
 }
 
 function looksLikeDirectMediaResource(entry: PerformanceResourceTiming): boolean {
