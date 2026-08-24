@@ -1,0 +1,15 @@
+[package]
+name = "subtitler-media"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Safe media preflight and normalized-audio pipeline abstractions for Subtitler."
+
+[dependencies]
+subtitler-core = { path = "../subtitler-core" }
+tempfile = "3.12"
+thiserror.workspace = true
+url.workspace = true
+reqwest.workspace = true

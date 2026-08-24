@@ -1,0 +1,25 @@
+[workspace]
+members = [
+    "crates/subtitler-core",
+    "crates/subtitler-media",
+    "crates/subtitler-asr",
+    "crates/subtitler-subtitles",
+    "crates/subtitler-native-host",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.78"
+license = "MIT OR Apache-2.0"
+authors = ["Subtitler Contributors"]
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+url = "2.5"
+uuid = { version = "1.8", features = ["serde", "v4"] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["blocking", "rustls-tls-webpki-roots"] }
+sysinfo = { version = "0.30.13", default-features = false }

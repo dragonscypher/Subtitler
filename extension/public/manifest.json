@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Subtitler",
+  "version": "0.1.0",
+  "description": "Create local-first transcripts and synchronized subtitles for media you are authorized to access.",
+  "action": {
+    "default_title": "Subtitler",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "nativeMessaging",
+    "downloads",
+    "offscreen"
+  ],
+  "host_permissions": [
+    "https://youtube.com/*",
+    "https://*.youtube.com/*",
+    "https://youtube-nocookie.com/*",
+    "https://*.youtube-nocookie.com/*"
+  ]
+}

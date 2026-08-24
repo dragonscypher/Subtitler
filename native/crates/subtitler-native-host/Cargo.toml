@@ -1,0 +1,28 @@
+[package]
+name = "subtitler-native-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Chrome Native Messaging host foundation for the Subtitler local engine."
+
+[lib]
+name = "subtitler_native_host"
+path = "src/lib.rs"
+
+[[bin]]
+name = "subtitler-native-host"
+path = "src/main.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+subtitler-core = { path = "../subtitler-core" }
+subtitler-asr = { path = "../subtitler-asr" }
+subtitler-media = { path = "../subtitler-media" }
+subtitler-subtitles = { path = "../subtitler-subtitles" }
+sysinfo.workspace = true
+tempfile = "3.12"
+thiserror.workspace = true
+url.workspace = true

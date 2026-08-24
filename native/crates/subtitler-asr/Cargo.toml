@@ -1,0 +1,17 @@
+[package]
+name = "subtitler-asr"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Local ASR provider interfaces and a safe whisper.cpp integration boundary."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+subtitler-core = { path = "../subtitler-core" }
+subtitler-media = { path = "../subtitler-media" }
+tempfile = "3.12"
+thiserror.workspace = true
+url.workspace = true

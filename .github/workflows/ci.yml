@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  extension:
+    name: Extension
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: extension
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+      - name: Install locked extension dependencies
+        run: npm ci
+      - name: Type-check extension
+        run: npm run typecheck
+      - name: Test extension
+        run: npm test
+      - name: Build extension
+        run: npm run build
+
+  native:
+    name: Native workspace
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: native
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Validate real local-pipeline helper contract
+        run: ..\scripts\test-real-local-pipeline-contract.ps1
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Lint native workspace
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test native workspace
+        run: cargo test --workspace --all-targets --locked
+      - name: Build native workspace
+        run: cargo build --workspace --locked

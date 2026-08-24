@@ -1,0 +1,29 @@
+# JavaScript / extension build output
+extension/node_modules/
+extension/dist/
+extension/coverage/
+
+# Rust build output
+native/target/
+
+# Local tools, models, caches, and generated media
+.subtitler/
+models/
+cache/
+artifacts/
+demo/
+*.whisper.bin
+*.gguf
+
+# Secrets and per-machine settings
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Editor and operating-system files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*.local.json
