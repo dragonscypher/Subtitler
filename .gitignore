@@ -21,9 +21,15 @@ yt-dlp/
 *.gguf
 
 # Raw local demo sources. Keep only docs/assets/subtitler-demo.gif in Git.
-/demo.mp4
 /docs/assets/subtitler_demo_trendy.gif
-/docs/assets/subtitler_demo_trendy.mp4
+
+# Temporary recording and audio artifacts
+*.wav
+*.mp3
+*.m4a
+*.mp4
+*.webm
+*.mkv
 
 # Local diagnostics and resumable-download by-products
 *.log
